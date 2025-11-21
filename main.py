@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import subprocess
 from datetime import datetime
+import shutil
 
 try:
     from PIL import Image
@@ -112,12 +113,13 @@ def convert_timestamp_to_exif(timestamp: int) -> str:
     return dt.strftime("%Y:%m:%d %H:%M:%S")
 
 
-def update_image_exif(image_file: Path, metadata: Dict) -> bool:
+def update_image_exif(image_file: Path, output_file: Path, metadata: Dict) -> bool:
     """
     Update EXIF metadata for an image file using piexif.
     
     Args:
-        image_file: Path to the image file
+        image_file: Path to the source image file
+        output_file: Path to save the updated image file
         metadata: Dictionary containing EXIF metadata
         
     Returns:
@@ -178,9 +180,12 @@ def update_image_exif(image_file: Path, metadata: Dict) -> bool:
         # Convert EXIF dict to bytes
         exif_bytes = piexif.dump(exif_dict)
         
-        # Save image with new EXIF data
+        # Create output directory if it doesn't exist
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save image with new EXIF data to output file
         img = Image.open(image_file)
-        img.save(str(image_file), exif=exif_bytes, quality=95)
+        img.save(str(output_file), exif=exif_bytes, quality=95)
         
         return True
     except Exception as e:
@@ -230,12 +235,13 @@ def check_exiftool_installed() -> bool:
         return False
 
 
-def update_video_exif(video_file: Path, metadata: Dict) -> bool:
+def update_video_exif(video_file: Path, output_file: Path, metadata: Dict) -> bool:
     """
     Update EXIF metadata for a video file using exiftool.
     
     Args:
-        video_file: Path to the video file
+        video_file: Path to the source video file
+        output_file: Path to save the updated video file
         metadata: Dictionary containing EXIF metadata
         
     Returns:
@@ -247,6 +253,12 @@ def update_video_exif(video_file: Path, metadata: Dict) -> bool:
         return False
     
     try:
+        # Create output directory if it doesn't exist
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Copy the file first
+        shutil.copy2(video_file, output_file)
+        
         # Build exiftool command
         cmd = ['exiftool', '-overwrite_original']
         
@@ -272,7 +284,7 @@ def update_video_exif(video_file: Path, metadata: Dict) -> bool:
             lon = metadata['gpsLongitude']
             cmd.extend([f'-GPSLatitude={lat}', f'-GPSLongitude={lon}'])
         
-        cmd.append(str(video_file))
+        cmd.append(str(output_file))
         
         # Execute exiftool
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -288,12 +300,14 @@ def update_video_exif(video_file: Path, metadata: Dict) -> bool:
         return False
 
 
-def process_media_file(media_file: Path, dry_run: bool = False) -> bool:
+def process_media_file(media_file: Path, source_folder: Path, output_folder: Path, dry_run: bool = False) -> bool:
     """
     Process a single media file: find JSON, load metadata, update file.
     
     Args:
         media_file: Path to the media file
+        source_folder: The original source folder
+        output_folder: The output folder for updated files
         dry_run: If True, only show what would be done
         
     Returns:
@@ -311,8 +325,12 @@ def process_media_file(media_file: Path, dry_run: bool = False) -> bool:
     if metadata is None:
         return False
     
+    # Calculate relative path from source folder
+    relative_path = media_file.relative_to(source_folder)
+    output_file = output_folder / relative_path
+    
     if dry_run:
-        print(f"[DRY RUN] Would update {media_file} with metadata from {json_file}")
+        print(f"[DRY RUN] Would update {media_file} -> {output_file} with metadata from {json_file}")
         return True
     
     # Update based on file type
@@ -320,14 +338,14 @@ def process_media_file(media_file: Path, dry_run: bool = False) -> bool:
     is_video = media_file.suffix.lower() in VIDEO_EXTENSIONS
     
     if is_image:
-        success = update_image_exif(media_file, metadata)
+        success = update_image_exif(media_file, output_file, metadata)
         if success:
-            print(f"✓ Updated image: {media_file}")
+            print(f"✓ Updated image: {media_file} -> {output_file}")
         return success
     elif is_video:
-        success = update_video_exif(media_file, metadata)
+        success = update_video_exif(media_file, output_file, metadata)
         if success:
-            print(f"✓ Updated video: {media_file}")
+            print(f"✓ Updated video: {media_file} -> {output_file}")
         return success
     
     return False
@@ -348,10 +366,16 @@ def main():
         action='store_true',
         help='Show what would be done without making changes'
     )
+    parser.add_argument(
+        '--output-suffix',
+        type=str,
+        default='-exif',
+        help='Suffix to append to the output folder name (default: -exif)'
+    )
     
     args = parser.parse_args()
     
-    folder = Path(args.folder)
+    folder = Path(args.folder).resolve()
     
     if not folder.exists():
         print(f"Error: Folder '{folder}' does not exist.")
@@ -361,7 +385,11 @@ def main():
         print(f"Error: '{folder}' is not a directory.")
         sys.exit(1)
     
+    # Create output folder name
+    output_folder = folder.parent / (folder.name + args.output_suffix)
+    
     print(f"Scanning folder: {folder}")
+    print(f"Output folder: {output_folder}")
     print("-" * 60)
     
     # Find all media files
@@ -384,7 +412,7 @@ def main():
         if json_file is None:
             skipped_count += 1
         else:
-            success = process_media_file(media_file, dry_run=args.dry_run)
+            success = process_media_file(media_file, folder, output_folder, dry_run=args.dry_run)
             if success:
                 success_count += 1
             else:
@@ -395,6 +423,8 @@ def main():
     print(f"  Updated: {success_count}")
     print(f"  Skipped (no JSON): {skipped_count}")
     print(f"  Errors: {error_count}")
+    if not args.dry_run and success_count > 0:
+        print(f"\nUpdated files saved to: {output_folder}")
 
 
 if __name__ == '__main__':
